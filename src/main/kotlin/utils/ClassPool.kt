@@ -1,23 +1,24 @@
 package utils
 
 import java.io.File
-import java.net.URI
 import javassist.ClassPool
+import java.nio.file.Paths
 
 private val currentJar: File by lazy {
-    File(ClassPool::class.java.protectionDomain.codeSource.location.toURI())
+    // Using Paths.get().toFile() is slightly more robust for local file systems
+    val location = ClassPool::class.java.protectionDomain.codeSource.location.toURI()
+    Paths.get(location).toFile()
 }
 
 /**
  * Determines the correct classpath argument for compilation or injection.
- *
- * If the current code is running from a directory (e.g., during development),
- * it uses the provided [classpath]. If it's running from a JAR, it uses
- * the path to the current JAR file.
- *
- * @param classpath The existing classpath string.
- * @return The determined classpath argument.
  */
 fun getClassPathArg(classpath: String): String {
-    return if (currentJar.isDirectory) classpath else currentJar.absolutePath
+    // If we are in an IDE, use the full classpath. 
+    // If we are a JAR, just use the JAR path itself.
+    return if (currentJar.isDirectory) {
+        classpath 
+    } else {
+        currentJar.absolutePath
+    }
 }
