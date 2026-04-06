@@ -1,16 +1,15 @@
 package utils
 
-import java.util.*
+import kotlin.random.Random
 
 /**
  * Generates a random lowercase string of a specified length.
- *
- * @param length The desired length of the string.
- * @return A random lowercase string.
+ * Used for camouflage fallbacks and temporary class naming.
  */
 fun makeRandomLowerCaseString(length: Int): String {
-    return (0 until length)
-        .map { kotlin.random.Random.nextInt(0, 26) } // Generate random numbers corresponding to lowercase letters
-        .map { 'a' + it } // Convert numbers to lowercase characters
-        .joinToString("") // Join characters into a string
+    val charPool : List<Char> = ('a'..'z').toList()
+    return (1..length)
+        .map { Random.nextInt(0, charPool.size) }
+        .map(charPool::get)
+        .joinToString("")
 }
