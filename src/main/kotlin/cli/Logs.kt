@@ -12,37 +12,28 @@ object Logs {
     private var taskFinish = false
 
     /**
-     * Starts logging a new task with a specified message.
-     *
-     * @param msg The message describing the task.
+     * Starts logging a new task. If a previous task wasn't finished, 
+     * it force-closes the previous one to keep the UI clean.
      */
     fun task(msg: String) {
+        if (task) forceFinish() 
         println(" ${brightMagenta("╓")} ${brightGreen(bold(msg))}")
         task = true
     }
 
-    /**
-     * Marks the current task as finishing. Subsequent log messages will be
-     * treated as the final message for the task.
-     *
-     * @return The Logs object for chaining.
-     */
     fun finish(): Logs {
         taskFinish = true
         return this
     }
 
     /**
-     * Internal function to log a message, handling task-specific formatting.
-     *
-     * @param message The message to log.
+     * Internal function to handle the ASCII borders.
      */
     private fun log(message: String) {
         if (task) {
             if (taskFinish) {
-                taskFinish = false
-                task = false
                 println(" ${brightMagenta("╙")} $message")
+                resetState()
             } else {
                 println(" ${brightMagenta("║")} $message")
             }
@@ -51,24 +42,22 @@ object Logs {
         }
     }
 
+    private fun resetState() {
+        taskFinish = false
+        task = false
+    }
+
     /**
-     * Logs an informational message.
-     *
-     * @param message The info message.
+     * Closes a task line if an error occurred before finish() was called.
      */
+    fun forceFinish() {
+        if (task) {
+            println(" ${brightMagenta("╙")} ${brightRed("Task interrupted/failed")}")
+            resetState()
+        }
+    }
+
     fun info(message: String) = log(brightWhite(message))
-
-    /**
-     * Logs a warning message.
-     *
-     * @param message The warning message.
-     */
     fun warn(message: String) = log(brightYellow(message))
-
-    /**
-     * Logs an error message.
-     *
-     * @param message The error message.
-     */
     fun error(message: String) = log(brightRed(message))
 }
