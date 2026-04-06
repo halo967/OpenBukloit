@@ -10,9 +10,6 @@ import java.nio.file.Paths
 
 /**
  * Converts Java class file major and minor versions to a human-readable Java version string.
- *
- * @param major The major version number.
- * @param minor The minor version number.
  * @return The corresponding Java version string (e.g., "1.8", "11", "17").
  */
 fun getJavaVersion(major: Int, minor: Int): String {
@@ -28,8 +25,6 @@ fun getJavaVersion(major: Int, minor: Int): String {
 
 /**
  * Determines the current operating system type.
- *
- * @return A lowercase string representing the OS type ("mac", "windows", "linux", or the first word of the OS name).
  */
 fun getOsType(): String {
     val os = System.getProperty("os.name", "generic").lowercase()
@@ -43,38 +38,35 @@ fun getOsType(): String {
 
 /**
  * Ensures that a compatible JDK is available for a given Java class file version.
- * If the JDK is not found locally, it attempts to download and install it from Adoptium.
- *
- * @param major The major version of the class file.
- * @param minor The minor version of the class file.
- * @return The Path to the 'javac' executable of the required JDK.
- * @throws Exception if the class version is not supported or the JDK cannot be found/installed.
+ * Includes automated download from Adoptium and execution permission fixes for Unix systems.
  */
 fun requireJDK(major: Int, minor: Int): Path {
-    // OpenBukloit supports Java 8 (major version 52) and above for compilation.
     if (major < 52) {
-        throw Exception("Class version $major.$minor is not supported by OpenBukloit. Minimum supported version is Java 8 (52.0).")
+        throw Exception("Class version $major.$minor is not supported. Minimum version is Java 8 (52.0).")
     }
 
     val versionId = getJavaVersion(major, minor)
     val jdkDir = File("./.openbukloit/jdk/$versionId")
     val currentOs = getOsType()
 
-    // Check for existing javac executable based on OS
+    // Determine expected javac path
     val existingJavacPath = when (currentOs) {
         "mac" -> Paths.get(jdkDir.canonicalPath, "Contents", "Home", "bin", "javac")
         "windows" -> Paths.get(jdkDir.canonicalPath, "bin", "javac.exe")
         else -> Paths.get(jdkDir.canonicalPath, "bin", "javac")
     }
 
+    // Return existing if found
     if (existingJavacPath.toFile().exists()) {
+        val file = existingJavacPath.toFile()
+        if (currentOs != "windows") file.setExecutable(true) // Ensure it's runnable
         Logs.info("Found existing JDK $versionId at ${jdkDir.canonicalPath}")
         return existingJavacPath
     }
 
-    Logs.info("JDK $versionId not found at ${jdkDir.canonicalPath}, downloading (this may take some time)...")
+    Logs.info("JDK $versionId not found locally. Downloading from Adoptium...")
 
-    // Determine system architecture for download
+    // Determine system architecture
     var currentArchitecture = System.getProperty("os.arch").lowercase()
     currentArchitecture = when (currentArchitecture) {
         "x86_64", "amd64" -> "x64"
@@ -83,89 +75,71 @@ fun requireJDK(major: Int, minor: Int): Path {
         else -> currentArchitecture
     }
 
-    // Fallback cause Adoptium does not provide native macOS aarch64 builds for Java less than 11
+    // Fallback for macOS ARM (M1/M2/M3) on older Java versions
     if (currentOs == "mac" && currentArchitecture == "aarch64" && major < 55) {
-        Logs.info("Adoptium does not support macOS aarch64 for Java $versionId. Falling back to x64 build...")
+        Logs.info("Falling back to x64 build for older macOS Java version...")
         currentArchitecture = "x64"
     }
 
-    // Determine archive extension based on OS
     val extension = if (currentOs == "windows") ".zip" else ".tar.gz"
     val binaryName = "jdk-$versionId-$currentOs-$currentArchitecture$extension"
-    // Construct Adoptium API download URL
     val url = "https://api.adoptium.net/v3/binary/latest/$versionId/ga/$currentOs/$currentArchitecture/jdk/hotspot/normal/eclipse?project=jdk"
 
-    // Create necessary directories for download and installation
     File("./.openbukloit/temp/jdk").mkdirs()
     jdkDir.mkdirs()
 
     val downloadedFilePath = Paths.get("./.openbukloit/temp/jdk", binaryName)
 
     try {
-        // Download the JDK binary
-        Logs.info("Downloading JDK from $url to ${downloadedFilePath.toFile().canonicalPath}")
+        Logs.info("Downloading JDK from $url")
         Files.copy(Yok.get(url).body.stream, downloadedFilePath)
 
-        Logs.info("JDK $versionId downloaded, extracting to ${jdkDir.canonicalPath}...")
-
-        // Extract the downloaded archive
+        Logs.info("Extracting JDK $versionId...")
         val archiver = if (extension == ".tar.gz") ArchiverFactory.createArchiver("tar", "gz") else ArchiverFactory.createArchiver("zip")
         archiver.extract(downloadedFilePath.toFile(), jdkDir)
 
-        // Move contents up one level if extracted into a subdirectory
+        // Fix potential double-directory extraction
         val extractedContents = jdkDir.listFiles()
         if (extractedContents != null && extractedContents.size == 1 && extractedContents[0].isDirectory) {
-            Logs.info("Adjusting extracted directory structure...")
             copyDirectory(extractedContents[0], jdkDir)
             extractedContents[0].deleteRecursively()
         }
 
-        Logs.info("JDK $versionId installed successfully")
-
-        // Re-check for javac executable after extraction
+        // Final verification and permission fix
         if (existingJavacPath.toFile().exists()) {
+            val file = existingJavacPath.toFile()
+            if (currentOs != "windows") file.setExecutable(true) // CRITICAL: Fixes Permission Denied on Linux
+            
+            Logs.info("JDK $versionId installed successfully")
             return existingJavacPath
         } else {
-            throw Exception("JDK $versionId installed but 'javac' executable not found at expected location: ${existingJavacPath.toFile().canonicalPath}")
+            throw Exception("JDK installed but 'javac' missing at: ${existingJavacPath.toFile().canonicalPath}")
         }
 
     } catch (e: Exception) {
-        // Clean up downloaded file and directory on failure
         if (downloadedFilePath.toFile().exists()) downloadedFilePath.toFile().delete()
         if (jdkDir.exists()) jdkDir.deleteRecursively()
-        throw Exception("Failed to download or install JDK $versionId: ${e.message}", e)
+        throw Exception("Failed to prepare JDK $versionId: ${e.message}", e)
     } finally {
-        // Clean up temporary download directory
-        val tempJdkDir = File("./.openbukloit/temp/jdk")
-        if (tempJdkDir.exists()) tempJdkDir.deleteRecursively()
+        File("./.openbukloit/temp/jdk").deleteRecursively()
     }
 }
 
 /**
- * Finds the path to the Java Runtime Environment (JRE) executable associated with a JDK path.
- *
- * @param jdkPath The Path to the 'javac' or 'javac.exe' executable within the JDK bin directory.
- * @return The Path to the 'java' or 'java.exe' executable.
- * @throws Exception if the JRE executable is not found.
- */
-/**
- * Finds the path to the Java Runtime Environment (JRE) executable associated with a JDK path.
- *
- * @param jdkPath The Path to the 'javac' or 'javac.exe' executable within the JDK bin directory.
- * @return The Path to the 'java' or 'java.exe' executable.
- * @throws Exception if the JRE executable is not found.
+ * Finds the path to the 'java' executable associated with a JDK path.
  */
 fun toJRE(jdkPath: Path): Path {
-    val binDir = jdkPath.parent.toFile() // Get the bin directory
-    val binDirPath = binDir.canonicalPath // Use canonicalPath from File
-
-    val jrePath = Paths.get(binDirPath, "java")
-    if (jrePath.toFile().exists()) {
+    val binDirPath = jdkPath.parent.toFile().canonicalPath
+    val currentOs = getOsType()
+    
+    val jreName = if (currentOs == "windows") "java.exe" else "java"
+    val jrePath = Paths.get(binDirPath, jreName)
+    
+    val jreFile = jrePath.toFile()
+    if (jreFile.exists()) {
+        if (currentOs != "windows") jreFile.setExecutable(true) // Ensure JRE is also runnable
         return jrePath
     }
-    val jreExePath = Paths.get(binDirPath, "java.exe")
-    if (jreExePath.toFile().exists()) {
-        return jreExePath
-    }
-    throw Exception("JRE executable ('java' or 'java.exe') not found in $binDirPath")
+    
+    throw Exception("JRE executable ('java') not found in $binDirPath")
 }
